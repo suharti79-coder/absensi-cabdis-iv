@@ -48,6 +48,11 @@ load_dotenv()
 
 # --- 1. INISIALISASI DATABASE FIREBASE ---
 if not firebase_admin._apps:
+    # Trik membaca Firebase Credentials dari Streamlit Secrets
+    if not os.path.exists("firebase_credentials.json") and "FIREBASE_JSON" in st.secrets:
+        with open("firebase_credentials.json", "w") as f:
+            f.write(st.secrets["FIREBASE_JSON"])
+
     cred = credentials.Certificate("firebase_credentials.json")
     firebase_admin.initialize_app(cred)
 
