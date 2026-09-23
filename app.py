@@ -20,13 +20,19 @@ import geopy.distance
 from PIL import Image
 from streamlit_js_eval import get_geolocation
 from dotenv import load_dotenv
+
+# Impor Firebase Firestore
+import firebase_admin
+from firebase_admin import credentials, firestore
+
+# Impor Supabase untuk Storage saja
 from supabase import create_client, Client
 
 # ==========================================
 # FUNGSI UTILITAS AWAL (Sangat Ringan)
 # ==========================================
 def kompres_foto(image_bytes, quality=50, max_size=(400, 400)):
-    """Fungsi kompresi ekstrem untuk menghemat Egress dan Storage"""
+    """Fungsi kompresi foto untuk menghemat Storage"""
     try:
         img = Image.open(io.BytesIO(image_bytes))
         if img.mode in ("RGBA", "P"):
@@ -35,19 +41,26 @@ def kompres_foto(image_bytes, quality=50, max_size=(400, 400)):
         output = io.BytesIO()
         img.save(output, format="JPEG", quality=quality, optimize=True)
         return output.getvalue()
-    except Exception as e:
+    except Exception:
         return image_bytes 
 
-# --- 1. MEMUAT ENVIRONMENT VARIABLES & SUPABASE ---
 load_dotenv()
 
+# --- 1. INISIALISASI DATABASE FIREBASE ---
+if not firebase_admin._apps:
+    cred = credentials.Certificate("firebase_credentials.json")
+    firebase_admin.initialize_app(cred)
+
+db = firestore.client()
+
+# --- 2. INISIALISASI SUPABASE STORAGE ---
 url = os.environ.get("SUPABASE_URL") or st.secrets.get("SUPABASE_URL", "")
 key = os.environ.get("SUPABASE_KEY") or st.secrets.get("SUPABASE_KEY", "")
 
 try:
     supabase: Client = create_client(url, key)
 except Exception as e:
-    st.error(f"Gagal terhubung ke Supabase: {e}")
+    st.error(f"Gagal terhubung ke Supabase Storage: {e}")
     st.stop()
 
 def upload_ke_supabase(file_bytes, file_path, content_type):
@@ -65,12 +78,12 @@ def upload_ke_supabase(file_bytes, file_path, content_type):
 
 @st.dialog("Peringatan File CSV ⚠️")
 def tampilkan_peringatan_csv():
-    st.write("Gagal memproses file: Terdapat **sel atau baris kosong** di dalam file CSV Anda.")
+    st.write("Gagal memproses file: Terdapat **sel atau baris kosong** di dalam file Anda.")
     st.write("Pastikan semua data terisi penuh dan hapus baris kosong di bagian paling bawah tabel, lalu coba upload ulang.")
     if st.button("Oke, Saya Mengerti", key="btn_close_dialog_csv", use_container_width=True):
         st.rerun()
 
-# --- 1.5. FUNGSI KRIPTOGRAFI KEAMANAN ---
+# --- 3. FUNGSI KRIPTOGRAFI KEAMANAN ---
 SECRET_KEY = os.environ.get("COOKIE_SECRET") or st.secrets.get("COOKIE_SECRET")
 SUPERADMIN_PASSWORD = os.environ.get("SUPERADMIN_PASSWORD") or st.secrets.get("SUPERADMIN_PASSWORD")
 
@@ -91,12 +104,12 @@ def verify_and_get_role(token: str):
     if hmac.compare_digest(client_signature, expected_signature):
         return role_name
     return None
-    
-# --- 2. KONFIGURASI HALAMAN & COOKIE ---
+
+# --- 4. KONFIGURASI HALAMAN & COOKIE ---
 st.set_page_config(page_title="Sistem Absensi Sekolah Cabdis Wil IV", page_icon="🏫", layout="centered")
 cookie_manager = stx.CookieManager(key="cookie_manager_utama")
 
-# --- 3. CUSTOM CSS ---
+# --- 5. CUSTOM CSS ---
 st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap');
@@ -118,20 +131,30 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 4. FUNGSI INTERAKSI DATABASE (OPTIMASI EGRESS) ---
+# --- 6. FUNGSI INTERAKSI FIREBASE FIRESTORE ---
 def get_data_sekolah():
     try:
-        res = supabase.table('sekolah').select('school_name, lat, lng, radius_m').execute()
-        if res.data: return pd.DataFrame(res.data)
+        docs = db.collection('sekolah').stream()
+        data = [doc.to_dict() for doc in docs]
+        if data: return pd.DataFrame(data)
     except: pass
     return pd.DataFrame(columns=['school_name', 'lat', 'lng', 'radius_m'])
 
 def get_data_pegawai():
     try:
-        # OPTIMASI: Tidak memanggil kolom photo_base64 secara massal!
-        res = supabase.table('pegawai').select('nip, name, school_name, photo_uploaded, is_cadar').execute()
-        if res.data:
-            df = pd.DataFrame(res.data)
+        docs = db.collection('pegawai').stream()
+        data = []
+        for doc in docs:
+            d = doc.to_dict()
+            data.append({
+                'nip': str(d.get('nip', '')),
+                'name': d.get('name', ''),
+                'school_name': d.get('school_name', ''),
+                'photo_uploaded': d.get('photo_uploaded', False),
+                'is_cadar': d.get('is_cadar', False)
+            })
+        if data:
+            df = pd.DataFrame(data)
             df['nip'] = df['nip'].astype(str)
             return df
     except: pass
@@ -139,24 +162,30 @@ def get_data_pegawai():
 
 def get_data_admin():
     try:
-        res = supabase.table('admins').select('id, username, password, sekolah').execute()
-        if res.data: return pd.DataFrame(res.data)
+        docs = db.collection('admins').stream()
+        data = []
+        for doc in docs:
+            d = doc.to_dict()
+            d['id'] = doc.id
+            data.append(d)
+        if data: return pd.DataFrame(data)
     except: pass
     return pd.DataFrame(columns=['id', 'username', 'password', 'sekolah'])
 
 def get_data_pengaturan():
     try:
-        res = supabase.table('pengaturan').select('batas_masuk, batas_pulang').execute()
-        if res.data:
-            return pd.DataFrame(res.data)
+        docs = db.collection('pengaturan').limit(1).stream()
+        data = [doc.to_dict() for doc in docs]
+        if data:
+            return pd.DataFrame(data)
         else:
             default_data = {'batas_masuk': '07:30', 'batas_pulang': '16:00'}
-            supabase.table('pengaturan').insert(default_data).execute()
+            db.collection('pengaturan').add(default_data)
             return pd.DataFrame([default_data])
     except:
         return pd.DataFrame([{'batas_masuk': '07:30', 'batas_pulang': '16:00'}])
 
-# --- 5. INISIALISASI SESSION STATE ---
+# --- 7. INISIALISASI SESSION STATE ---
 for key_state, val in {'role': None, 'admin_sekolah': "Semua Sekolah", 'logout_triggered': False, 'wajah_terverifikasi': False}.items():
     if key_state not in st.session_state: st.session_state[key_state] = val
 
@@ -217,16 +246,11 @@ if st.session_state.role is None:
             input_user_admin = st.text_input("Username Admin:", key="user_admin_main")
             pwd = st.text_input("Password Admin:", type="password", key="pwd_admin_main")
             if st.button("Masuk Admin", use_container_width=True, key="btn_admin_main"):
-                df_adm = get_data_admin()
-                is_valid = False
-                assigned_school = "Semua Sekolah"
-                if not df_adm.empty and 'username' in df_adm.columns:
-                    match = df_adm[(df_adm['username'] == input_user_admin) & (df_adm['password'] == pwd)]
-                    if not match.empty:
-                        is_valid = True
-                        assigned_school = match.iloc[0]['sekolah']
-                if is_valid: 
+                docs = db.collection('admins').where('username', '==', input_user_admin).where('password', '==', pwd).stream()
+                match = [d.to_dict() for d in docs]
+                if match: 
                     st.session_state.role = "Admin"
+                    assigned_school = match[0].get('sekolah', 'Semua Sekolah')
                     st.session_state.admin_sekolah = assigned_school
                     cookie_manager.set("auth_token", generate_signed_token("Admin"), key="set_token_login_admin")
                     cookie_manager.set("admin_sekolah", assigned_school, key="set_sch_login_admin")
@@ -270,9 +294,9 @@ if st.session_state.role == "Pegawai":
     
     if nip_input.strip():
         try:
-            # OPTIMASI: Panggil data foto HANYA saat NIP ini login
-            res_pegawai = supabase.table('pegawai').select('nip, name, school_name, photo_uploaded, photo_base64, is_cadar').eq('nip', str(nip_input.strip())).execute()
-            df_kandidat = pd.DataFrame(res_pegawai.data) if res_pegawai.data else pd.DataFrame()
+            docs_pegawai = db.collection('pegawai').where('nip', '==', str(nip_input.strip())).stream()
+            data_kandidat = [d.to_dict() for d in docs_pegawai]
+            df_kandidat = pd.DataFrame(data_kandidat) if data_kandidat else pd.DataFrame()
         except: df_kandidat = pd.DataFrame()
             
         if df_kandidat.empty:
@@ -286,15 +310,16 @@ if st.session_state.role == "Pegawai":
                 
             curr_dev_cookie = cookie_manager.get("school_device_token")
             try:
-                res_dev_count = supabase.table('perangkat_sekolah').select('id').eq('school_name', sch_data['school_name']).execute()
-                total_terdaftar = len(res_dev_count.data) if res_dev_count.data else 0
+                docs_dev = db.collection('perangkat_sekolah').where('school_name', '==', sch_data['school_name']).stream()
+                list_dev = [d.to_dict() for d in docs_dev]
+                total_terdaftar = len(list_dev)
             except: total_terdaftar = 0
 
             is_valid_pc = False
             if total_terdaftar > 0:
                 try:
-                    res_valid = supabase.table('perangkat_sekolah').select('id').eq('school_name', sch_data['school_name']).eq('device_id', str(curr_dev_cookie)).execute()
-                    if res_valid.data: is_valid_pc = True
+                    docs_valid = db.collection('perangkat_sekolah').where('school_name', '==', sch_data['school_name']).where('device_id', '==', str(curr_dev_cookie)).stream()
+                    if len(list(docs_valid)) > 0: is_valid_pc = True
                 except: pass
                 
                 if not is_valid_pc:
@@ -389,8 +414,9 @@ if st.session_state.role == "Pegawai":
                                     jenis_aksi = "Masuk" if btn_masuk else "Pulang"
                                     
                                     try:
-                                        res_absen = supabase.table('absensi').select('status').eq('nip', str(emp_data['nip'])).eq('tanggal', tgl_sekarang).execute()
-                                        df_absen_hari_ini = pd.DataFrame(res_absen.data) if res_absen.data else pd.DataFrame()
+                                        docs_absen = db.collection('absensi').where('nip', '==', str(emp_data['nip'])).where('tanggal', '==', tgl_sekarang).stream()
+                                        abs_list = [d.to_dict() for d in docs_absen]
+                                        df_absen_hari_ini = pd.DataFrame(abs_list) if abs_list else pd.DataFrame()
                                     except: df_absen_hari_ini = pd.DataFrame()
                                     
                                     if not df_absen_hari_ini.empty and not df_absen_hari_ini[df_absen_hari_ini['status'].str.contains(jenis_aksi, na=False, case=False)].empty:
@@ -412,12 +438,12 @@ if st.session_state.role == "Pegawai":
 
                                         status_final = f"Hadir {'[Audit] ' if is_cadar else ''}- {jenis_absen}"
                                         
-                                        supabase.table('absensi').insert({
+                                        db.collection('absensi').add({
                                             'nip': str(emp_data['nip']), 'nama': emp_data['name'], 
                                             'sekolah': sch_data['school_name'], 'tanggal': tgl_sekarang, 
                                             'jam': now.strftime('%H:%M:%S'), 'jarak_m': str(round(jarak_meter, 1)), 
                                             'status': status_final, 'foto_bukti': url_foto_harian if url_foto_harian else "" 
-                                        }).execute()
+                                        })
                                         st.success(f"✅ Absensi {jenis_absen} berhasil!")
                             else: st.warning("Tunggu verifikasi biometrik selesai...")
                 else: st.error(f"⛔ Anda berada di luar radius ({jarak_meter:.0f} m dari {sch_data['radius_m']} m).")
@@ -436,8 +462,8 @@ elif st.session_state.role == "Admin":
     st.markdown("### 🖥️ 1. Kelola PC Absensi Sekolah")
     with st.expander("📌 Pendaftaran & Daftar PC", expanded=True):
         try:
-            res_pc = supabase.table('perangkat_sekolah').select('id, device_name').eq('school_name', admin_akses).execute()
-            list_pc = res_pc.data if res_pc.data else []
+            docs_pc = db.collection('perangkat_sekolah').where('school_name', '==', admin_akses).stream()
+            list_pc = [{'id': d.id, **d.to_dict()} for d in docs_pc]
         except: list_pc = []
 
         total_terdaftar = len(list_pc)
@@ -453,7 +479,11 @@ elif st.session_state.role == "Admin":
                 elif nama_pc_input.strip():
                     new_token = str(uuid.uuid4())
                     cookie_manager.set("school_device_token", new_token, key="set_pc_cookie_dyn")
-                    supabase.table('perangkat_sekolah').insert({'school_name': admin_akses, 'device_id': new_token, 'device_name': nama_pc_input.strip()}).execute()
+                    db.collection('perangkat_sekolah').add({
+                        'school_name': admin_akses, 
+                        'device_id': new_token, 
+                        'device_name': nama_pc_input.strip()
+                    })
                     st.success("✅ PC berhasil didaftarkan!")
                     time.sleep(1)
                     st.rerun()
@@ -473,11 +503,18 @@ elif st.session_state.role == "Admin":
     
     if search_query_foto.strip():
         try:
-            # OPTIMASI: Panggil photo_base64 hanya saat spesifik mencari!
-            query = supabase.table('pegawai').select('nip, name, school_name, photo_uploaded, photo_base64, is_cadar')
-            if sekolah_pilihan_foto != "Semua Sekolah": query = query.eq('school_name', sekolah_pilihan_foto)
-            res_search = query.or_(f"nip.ilike.%{search_query_foto}%,name.ilike.%{search_query_foto}%").execute()
-            df_kandidat = pd.DataFrame(res_search.data) if res_search.data else pd.DataFrame()
+            if sekolah_pilihan_foto != "Semua Sekolah":
+                docs_peg = db.collection('pegawai').where('school_name', '==', sekolah_pilihan_foto).stream()
+            else:
+                docs_peg = db.collection('pegawai').stream()
+            
+            data_all_peg = [d.to_dict() for d in docs_peg]
+            if data_all_peg:
+                df_all = pd.DataFrame(data_all_peg)
+                q_lower = search_query_foto.lower()
+                mask = df_all['nip'].astype(str).str.lower().str.contains(q_lower, na=False) | df_all['name'].astype(str).str.lower().str.contains(q_lower, na=False)
+                df_kandidat = df_all[mask]
+            else: df_kandidat = pd.DataFrame()
         except: df_kandidat = pd.DataFrame()
             
         if not df_kandidat.empty:
@@ -497,7 +534,12 @@ elif st.session_state.role == "Admin":
                             file_bytes = kompres_foto(foto.getvalue(), quality=60, max_size=(600, 600))
                             url_foto = upload_ke_supabase(file_bytes, f"foto_acuan/{nip}.jpg", "image/jpeg")
                             if url_foto:
-                                supabase.table('pegawai').update({'photo_uploaded': True, 'photo_base64': url_foto}).eq('nip', nip).execute()
+                                docs_to_update = db.collection('pegawai').where('nip', '==', nip).stream()
+                                for doc_u in docs_to_update:
+                                    doc_u.reference.update({
+                                        'photo_uploaded': True, 
+                                        'photo_base64': url_foto
+                                    })
                                 st.session_state.employees = get_data_pegawai()
                                 st.rerun()
 
@@ -516,9 +558,9 @@ elif st.session_state.role == "Admin":
         if not df_emp.empty:
             tgl_str = tgl_pilihan.strftime('%Y-%m-%d')
             try:
-                # OPTIMASI: Abaikan foto_bukti (mengurangi egress drastis)
-                res_absen_admin = supabase.table('absensi').select('nip, status, jam, jarak_m').eq('tanggal', tgl_str).execute()
-                df_absen_tgl = pd.DataFrame(res_absen_admin.data) if res_absen_admin.data else pd.DataFrame()
+                docs_absen = db.collection('absensi').where('tanggal', '==', tgl_str).stream()
+                data_abs = [d.to_dict() for d in docs_absen]
+                df_absen_tgl = pd.DataFrame(data_abs) if data_abs else pd.DataFrame()
             except: df_absen_tgl = pd.DataFrame()
             
             rekap_list = []
@@ -559,21 +601,17 @@ elif st.session_state.role == "Admin":
         if filter_sch_rekap != "-- Pilih Sekolah --":
             with st.spinner("Menghitung kalkulasi..."):
                 try:
-                    res_peg = supabase.table('pegawai').select('nip, name').eq('school_name', filter_sch_rekap).execute()
+                    docs_p = db.collection('pegawai').where('school_name', '==', filter_sch_rekap).stream()
+                    data_p = [d.to_dict() for d in docs_p]
                     
-                    # OPTIMASI EGRESS: Hanya memanggil nip, tanggal, jam, status. (Ribuan row jauh lebih ringan)
-                    res_abs = supabase.table('absensi').select('nip, tanggal, jam, status').eq('sekolah', filter_sch_rekap).like('tanggal', f"{filter_bln_rekap}%").limit(5000).execute()
+                    docs_a = db.collection('absensi').where('sekolah', '==', filter_sch_rekap).stream()
+                    all_abs = [d.to_dict() for d in docs_a]
+                    data_a = [a for a in all_abs if str(a.get('tanggal', '')).startswith(filter_bln_rekap)]
                     
-                    if res_peg.data:
-                        rekap_data = {str(p['nip']): {'NIP': str(p['nip']), 'NAMA': p['name'], 'MENIT TERLAMBAT': 0, 'MENIT CEPAT PULANG': 0, 'JUMLAH KEHADIRAN': 0, 'TANPA KETERANGAN': 0, 'SAKIT': 0, 'DINAS LUAR': 0, 'CUTI': 0, '_tdk': 0} for p in res_peg.data}
-                        abs_dict = {}
-                        if res_abs.data:
-                            for a in res_abs.data:
-                                nip, tgl = str(a['nip']), a['tanggal']
-                                abs_dict.setdefault(nip, {}).setdefault(tgl, []).append(a)
-                            
-                        # Format standard output dataframe
-                        df_rekap = pd.DataFrame(list(rekap_data.values())).drop(columns=['_tdk'])
+                    if data_p:
+                        rekap_data = {str(p['nip']): {'NIP': str(p['nip']), 'NAMA': p['name'], 'MENIT TERLAMBAT': 0, 'MENIT CEPAT PULANG': 0, 'JUMLAH KEHADIRAN': 0, 'TANPA KETERANGAN': 0, 'SAKIT': 0, 'DINAS LUAR': 0, 'CUTI': 0} for p in data_p}
+                        
+                        df_rekap = pd.DataFrame(list(rekap_data.values()))
                         st.dataframe(df_rekap, use_container_width=True)
                         buffer = io.BytesIO()
                         with pd.ExcelWriter(buffer, engine='openpyxl') as writer: df_rekap.to_excel(writer, index=False)
@@ -595,7 +633,8 @@ elif st.session_state.role == "Superadmin":
         edited_schools = st.data_editor(st.session_state.schools, num_rows="dynamic", use_container_width=True)
         if st.button("💾 Simpan Perubahan Sekolah", type="primary"):
             records = edited_schools.to_dict(orient='records')
-            if records: supabase.table('sekolah').upsert(records, on_conflict='school_name').execute()
+            for rec in records:
+                db.collection('sekolah').document(rec['school_name']).set(rec, merge=True)
             st.session_state.schools = get_data_sekolah()
             st.rerun()
 
@@ -603,15 +642,18 @@ elif st.session_state.role == "Superadmin":
         st.markdown("### Buka Kunci PC")
         sekolah_pilihan_pc = st.selectbox("Filter Sekolah:", ["Semua Sekolah"] + st.session_state.schools['school_name'].tolist())
         try:
-            query_pc = supabase.table('perangkat_sekolah').select('id, school_name, device_name')
-            if sekolah_pilihan_pc != "Semua Sekolah": query_pc = query_pc.eq('school_name', sekolah_pilihan_pc)
-            res_pc_super = query_pc.execute()
-            if res_pc_super.data:
-                for idx, r_pc in pd.DataFrame(res_pc_super.data).iterrows():
+            if sekolah_pilihan_pc != "Semua Sekolah":
+                docs_pc = db.collection('perangkat_sekolah').where('school_name', '==', sekolah_pilihan_pc).stream()
+            else:
+                docs_pc = db.collection('perangkat_sekolah').stream()
+            
+            list_pc_super = [{'id': d.id, **d.to_dict()} for d in docs_pc]
+            if list_pc_super:
+                for r_pc in list_pc_super:
                     c1, c2, c3 = st.columns([2, 2, 1])
-                    c1.write(r_pc['school_name']); c2.write(r_pc['device_name'])
+                    c1.write(r_pc.get('school_name', '')); c2.write(r_pc.get('device_name', ''))
                     if c3.button("🔓 Hapus Kunci", key=f"del_{r_pc['id']}"):
-                        supabase.table('perangkat_sekolah').delete().eq('id', r_pc['id']).execute()
+                        db.collection('perangkat_sekolah').document(r_pc['id']).delete()
                         st.rerun()
         except: pass
 
@@ -621,8 +663,15 @@ elif st.session_state.role == "Superadmin":
         if file_upload and st.button("Proses Upload"):
             try:
                 df_upload = pd.read_excel(file_upload, dtype=str).dropna(subset=['nip', 'name', 'school_name'], how='all')
-                records = [{'nip': str(r['nip']).strip(), 'name': str(r['name']).strip(), 'school_name': str(r['school_name']).strip(), 'photo_uploaded': False, 'is_cadar': False} for _, r in df_upload.iterrows()]
-                supabase.table('pegawai').upsert(records, on_conflict='nip').execute()
+                for _, r in df_upload.iterrows():
+                    nip_str = str(r['nip']).strip()
+                    db.collection('pegawai').document(nip_str).set({
+                        'nip': nip_str,
+                        'name': str(r['name']).strip(),
+                        'school_name': str(r['school_name']).strip(),
+                        'photo_uploaded': False,
+                        'is_cadar': False
+                    }, merge=True)
                 st.session_state.employees = get_data_pegawai()
                 st.success("✅ Berhasil upload pegawai!")
                 st.rerun()
@@ -634,20 +683,30 @@ elif st.session_state.role == "Superadmin":
         for idx, row in df_admins.iterrows():
             with st.expander(f"👤 {row['username']} - {row['sekolah']}"):
                 if st.button("🗑️ Hapus Admin", key=f"del_adm_{idx}"):
-                    supabase.table('admins').delete().eq('id', row['id']).execute()
+                    db.collection('admins').document(row['id']).delete()
                     st.rerun()
 
     with tab4:
         st.markdown("### Input Izin / Surat (Bypass)")
         nip_input_izin = st.text_input("NIP Pegawai:")
         if st.button("Input Surat Kosong/Izin") and nip_input_izin:
-            supabase.table('absensi').insert({'nip': nip_input_izin, 'nama': 'Manual', 'sekolah': 'Manual', 'tanggal': datetime.datetime.now().strftime('%Y-%m-%d'), 'jam': '-', 'status': 'Izin'}).execute()
+            db.collection('absensi').add({
+                'nip': nip_input_izin, 
+                'nama': 'Manual', 
+                'sekolah': 'Manual', 
+                'tanggal': datetime.datetime.now().strftime('%Y-%m-%d'), 
+                'jam': '-', 
+                'status': 'Izin'
+            })
             st.success("Izin dicatat!")
 
     with tab5:
         st.markdown("### 🚨 Database Clean Up")
         if st.button("🖼️ Hapus Semua Foto (Teks Aman)", type="primary"):
-            supabase.table('absensi').update({'foto_bukti': ''}).neq('foto_bukti', '').execute()
+            docs_a = db.collection('absensi').stream()
+            for d in docs_a:
+                if d.to_dict().get('foto_bukti'):
+                    d.reference.update({'foto_bukti': ''})
             st.success("Foto fisik berhasil diputus dari database (Hemat Egress).")
 
     with tab6:
@@ -657,6 +716,11 @@ elif st.session_state.role == "Superadmin":
         n_in = st.time_input("Batas Masuk", datetime.datetime.strptime(b_in, '%H:%M').time())
         n_out = st.time_input("Batas Pulang", datetime.datetime.strptime(b_out, '%H:%M').time())
         if st.button("Simpan Pengaturan"):
-            supabase.table('pengaturan').update({'batas_masuk': n_in.strftime('%H:%M'), 'batas_pulang': n_out.strftime('%H:%M')}).neq('batas_masuk', '').execute()
+            docs_s = db.collection('pengaturan').limit(1).stream()
+            for d in docs_s:
+                d.reference.update({
+                    'batas_masuk': n_in.strftime('%H:%M'), 
+                    'batas_pulang': n_out.strftime('%H:%M')
+                })
             st.session_state.settings = get_data_pengaturan()
             st.rerun()
